@@ -659,7 +659,6 @@
       else { btn.classList.add('locked'); btn.disabled = true; txt.innerHTML = `🔒 Need ${target - refs} More Refs (Get ${reward} ${sym})`; btn.querySelector('i').className = 'fas fa-lock'; }
     }
 
-    // 🔥 মাইলস্টোন ক্লেইম ফাংশন (Transaction ব্যবহার করে ঠিক করা হয়েছে)
     async function claimMilestone() {
       const target = Number(appState.config.refMilestoneTarget || 20); 
       const reward = Number(appState.config.refMilestoneReward || 200); 
@@ -672,7 +671,7 @@
       try {
         await db.ref('users/' + appState.user.id).transaction(user => {
             if (user) {
-                if (user.milestoneClaimed) return; // আগেই ক্লেইম করা থাকলে কিছু করবে না
+                if (user.milestoneClaimed) return;
                 user.balance = (user.balance || 0) + reward;
                 user.totalEarned = (user.totalEarned || 0) + reward;
                 user.milestoneClaimed = true;
@@ -1152,49 +1151,64 @@
 
       const userRef = db.ref('users/' + tgUser.id);
       
-      // 🔥 নতুন ইউজার তৈরি এবং রেফারেল বোনাস লজিক (সংশোধিত)
       userRef.once('value').then(async snap => {
         const today = todayStr();
+        
         if(!snap.exists()) {
-          // নতুন ইউজার তৈরি
+          // ১. নতুন ইউজার তৈরি করা
           appState.user = { 
               id: tgUser.id, name: tgUser.first_name, photo: tgUser.photo_url||'', balance: 0, totalEarned: 0, referrals: 0, dailyAds: {}, taskHistory: {}, lastActive: today, dailyBonusDate: '', lastReadNoticeAt: 0, lastReadTaskAt: 0, lastReadWdAt: 0, isBanned: false, milestoneClaimed: false 
           };
           await userRef.set(appState.user);
 
-          // রেফারেল আইডি চেক করা
-          let refBy = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) ? tg.initDataUnsafe.start_param : null;
-          if(!refBy) { 
-              const urlParams = new URLSearchParams(window.location.search); 
-              refBy = urlParams.get('tgWebAppStartParam') || urlParams.get('startapp'); 
+          // ২. রেফারেল আইডি বের করার ১০০% নিশ্চিত লজিক (Telegram API + URL)
+          let refBy = null;
+          
+          if (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) {
+              refBy = tg.initDataUnsafe.start_param;
+          } 
+          
+          if (!refBy) {
+              const urlParams = new URLSearchParams(window.location.search);
+              refBy = urlParams.get('tgWebAppStartParam') || urlParams.get('startapp');
           }
 
-          if(refBy && String(refBy) !== String(tgUser.id)) {
-             // কনফিগ থেকে রেফার বোনাস নেওয়া
+          if (!refBy && tg && tg.initData) {
+              const initDataParams = new URLSearchParams(tg.initData);
+              refBy = initDataParams.get('start_param');
+          }
+
+          // ৩. রেফার আইডি চেক এবং বোনাস দেওয়া
+          if(refBy && String(refBy).trim() !== '' && String(refBy).trim() !== String(tgUser.id)) {
+             console.log("Referral ID Found:", refBy);
+             
              let cSnap = await db.ref('config').once('value'); 
              let configData = cSnap.val() || {};
-             let rBonus = configData.refBonus ? Number(configData.refBonus) : 5; // ডিফল্ট 5 টাকা
+             let rBonus = configData.refBonus ? Number(configData.refBonus) : 5; // ডিফল্ট ৫ টাকা
 
-             // রেফারার এর ডাটা চেক
              let refSnap = await db.ref('users/' + refBy).once('value');
+             
              if(refSnap.exists()){ 
-                 // 🔥 Transaction ব্যবহার করে সেফলি ব্যালেন্স আপডেট
+                 // ট্রানজেকশন ব্যবহার করে সেফলি রেফারারের একাউন্টে টাকা ও কাউন্ট যোগ করা
                  await db.ref('users/' + refBy).transaction(refUser => {
                      if (refUser) {
-                         refUser.referrals = (refUser.referrals || 0) + 1;
-                         refUser.balance = (refUser.balance || 0) + rBonus;
-                         refUser.totalEarned = (refUser.totalEarned || 0) + rBonus;
+                         refUser.referrals = (Number(refUser.referrals) || 0) + 1;
+                         refUser.balance = (Number(refUser.balance) || 0) + rBonus;
+                         refUser.totalEarned = (Number(refUser.totalEarned) || 0) + rBonus;
                      }
                      return refUser;
                  });
                  
-                 // নতুন ইউজারের ডাটাবেসে রেফারার আইডি সেভ করে রাখা
-                 await userRef.update({ referredBy: refBy });
+                 // নতুন ইউজারের প্রোফাইলে সেভ করা কে তাকে রেফার করেছে
+                 await userRef.update({ referredBy: String(refBy).trim() });
+                 console.log("Referral bonus added successfully!");
+             } else {
+                 console.log("Referrer not found in database.");
              }
           }
         }
 
-        // 🔥 লাইভ ইউজার আপডেট লিসেনার
+        // ৪. লাইভ ইউজার ডাটা লিসেনার
         userRef.on('value', async liveSnap => {
           if(liveSnap.exists()) {
             appState.user = liveSnap.val(); 
@@ -1206,13 +1220,11 @@
             if(typeof appState.user.isBanned === 'undefined') appState.user.isBanned = false; 
             if(typeof appState.user.milestoneClaimed === 'undefined') appState.user.milestoneClaimed = false;
             
-            // প্রতিদিনের রিসেট
             if(appState.user.lastActive !== today) { 
                 await userRef.update({ dailyAds: {}, lastActive: today }); 
                 appState.user.dailyAds = {}; 
             }
 
-            // ব্যান চেক
             if(appState.user.isBanned === true) {
               document.getElementById('loader').style.display = 'none'; 
               document.getElementById('app').style.display = 'none'; 
